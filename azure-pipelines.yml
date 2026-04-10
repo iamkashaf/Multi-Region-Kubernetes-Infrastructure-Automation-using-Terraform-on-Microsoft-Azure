@@ -1,0 +1,164 @@
+trigger:
+  branches:
+    include:
+      - develop
+      - main
+
+  paths:
+    include:
+      - environments/*
+      - modules/*
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  TF_VERSION: '1.5.0'
+
+stages:
+
+# ================= SECURITY STAGE =================
+- stage: SECURITY
+  displayName: "Security & Cost Analysis"
+
+  jobs:
+  - job: SecurityChecks
+    displayName: "Run DevSecOps Tools"
+
+    steps:
+    - checkout: self
+
+    # GitLeaks
+    - script: |
+        docker run --rm -v $(pwd):/repo zricethezav/gitleaks detect --source=/repo
+      displayName: "GitLeaks Scan"
+
+    # Checkov (no official task → script)
+    - script: |
+        pip install checkov
+        echo "Scanning environments..."
+        checkov -d environments/ --framework terraform --hard-fail-on HIGH --quiet
+
+        echo "Scanning modules..."
+        checkov -d modules/ --framework terraform --hard-fail-on HIGH --quiet
+        
+      displayName: "Checkov Security Scan"
+
+    # SonarQube
+    - task: SonarQubePrepare@5
+      inputs:
+        SonarQube: 'SonarConnection'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'terraform-project'
+        cliSources: '.'
+
+    - task: SonarQubeAnalyze@5
+
+    - task: SonarQubePublish@5
+      inputs:
+        pollingTimeoutSec: '300'
+
+    # Infracost (Terraform Cost Estimation)
+    - script: |
+        curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+        infracost breakdown --path . --format table
+      displayName: "Infracost Estimate"
+
+---
+
+# ================= DEV STAGE =================
+- stage: DEV
+  displayName: "Deploy to DEV"
+  dependsOn: SECURITY
+  condition: eq(variables['Build.SourceBranchName'], 'develop')
+
+  jobs:
+  - job: DeployDEV
+    displayName: "Terraform DEV"
+
+    steps:
+    - checkout: self
+
+    # Terraform Install (TASK)
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: $(TF_VERSION)
+
+    # INIT
+    - task: TerraformCLI@1
+      displayName: "Terraform Init (DEV)"
+      inputs:
+        command: 'init'
+        workingDirectory: 'environments/dev'
+
+    # VALIDATE
+    - task: TerraformCLI@1
+      displayName: "Terraform Validate (DEV)"
+      inputs:
+        command: 'validate'
+        workingDirectory: 'environments/dev'
+
+    # PLAN
+    - task: TerraformCLI@1
+      displayName: "Terraform Plan (DEV)"
+      inputs:
+        command: 'plan'
+        workingDirectory: 'environments/dev'
+
+    # APPLY
+    - task: TerraformCLI@1
+      displayName: "Terraform Apply (DEV)"
+      inputs:
+        command: 'apply'
+        workingDirectory: 'environments/dev'
+        commandOptions: '-auto-approve'
+
+---
+
+# ================= PROD STAGE =================
+- stage: PROD
+  displayName: "Deploy to PROD"
+  dependsOn: SECURITY
+  condition: eq(variables['Build.SourceBranchName'], 'main')
+
+  jobs:
+  - job: DeployPROD
+    displayName: "Terraform PROD"
+
+    steps:
+    - checkout: self
+
+    # Terraform Install
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: $(TF_VERSION)
+
+    # INIT
+    - task: TerraformCLI@1
+      displayName: "Terraform Init (PROD)"
+      inputs:
+        command: 'init'
+        workingDirectory: 'environments/prod'
+
+    # VALIDATE
+    - task: TerraformCLI@1
+      displayName: "Terraform Validate (PROD)"
+      inputs:
+        command: 'validate'
+        workingDirectory: 'environments/prod'
+
+    # PLAN
+    - task: TerraformCLI@1
+      displayName: "Terraform Plan (PROD)"
+      inputs:
+        command: 'plan'
+        workingDirectory: 'environments/prod'
+
+    # APPLY
+    - task: TerraformCLI@1
+      displayName: "Terraform Apply (PROD)"
+      inputs:
+        command: 'apply'
+        workingDirectory: 'environments/prod'
+        commandOptions: '-auto-approve'
